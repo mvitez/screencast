@@ -32,7 +32,7 @@ const char *notify_template =
     "NT: urn:schemas-upnp-org:device:MediaServer:1\r\n"
     "NTS: ssdp:alive\r\n"
     "SERVER: %s/1.0\r\n"
-    "USN: uuid:4af61038-0245-4027-b2fd-799c1b604e24::urn:schemas-upnp-org:device:MediaServer:1\r\n"
+    "USN: uuid:%s::urn:schemas-upnp-org:device:MediaServer:1\r\n"
     "X-DLNADOC: DMS-1.50\r\n\r\n";
 
 // M-SEARCH response template for MediaServer
@@ -44,7 +44,7 @@ const char *search_response_template =
     "LOCATION: http://%s/description.xml\r\n"
     "SERVER: %s/1.0\r\n"
     "ST: urn:schemas-upnp-org:device:MediaServer:1\r\n"
-    "USN: uuid:4af61038-0245-4027-b2fd-799c1b604e24::urn:schemas-upnp-org:device:MediaServer:1\r\n"
+    "USN: uuid:%s::urn:schemas-upnp-org:device:MediaServer:1\r\n"
     "X-DLNADOC: DMS-1.50\r\n\r\n";
 
 // Device description XML template for MediaServer
@@ -65,7 +65,7 @@ const char *device_description_template =
     "    <modelNumber>1.0</modelNumber>\r\n"
     "    <modelURL>https://github.com/mvitez/screencast</modelURL>\r\n"
     "    <serialNumber>00000000</serialNumber>\r\n"
-    "    <UDN>uuid:4af61038-0245-4027-b2fd-799c1b604e24</UDN>\r\n"
+    "    <UDN>uuid:%s</UDN>\r\n"
     "    <dlna:X_DLNADOC>DMS-1.50</dlna:X_DLNADOC>\r\n"
     "    <serviceList>\r\n"
     "      <service>\r\n"
@@ -224,7 +224,7 @@ int contains_soap_action(const char *buffer, const char *action)
 }
 
 // Function to handle HTTP requests
-void handle_http_request(int client_sock, const char *local_endpoint, const char *name)
+void handle_http_request(int client_sock, const char *local_endpoint, const char *name, const char *uuid)
 {
     char buffer[BUFFER_SIZE];
     char *p;
@@ -241,7 +241,7 @@ void handle_http_request(int client_sock, const char *local_endpoint, const char
     printf("Incoming HTTP request: %*.*s\n", (int)n, (int)n, buffer);
     if (strstr(buffer, "GET /description.xml") != NULL)
     {
-        snprintf(buffer, sizeof(buffer), device_description_template, name, name, name);
+        snprintf(buffer, sizeof(buffer), device_description_template, name, name, name, uuid);
         response = buffer;
     }
     else if (strstr(buffer, "GET /ContentDirectory.xml") != NULL)
@@ -302,8 +302,7 @@ void handle_http_request(int client_sock, const char *local_endpoint, const char
 struct server_param
 {
     int server_sock;
-    const char *local_endpoint;
-    const char *name;
+    const char *local_endpoint, *name, *uuid;
 };
 
 // Thread function to handle HTTP server
@@ -312,6 +311,7 @@ void *http_server_thread(void *arg)
     const char *local_endpoint = ((struct server_param *)arg)->local_endpoint;
     int server_sock = ((struct server_param *)arg)->server_sock;
     const char *name = ((struct server_param *)arg)->name;
+    const char *uuid = ((struct server_param *)arg)->uuid;
 
     for (;;)
     {
@@ -321,7 +321,7 @@ void *http_server_thread(void *arg)
 
         if (client_sock >= 0)
         {
-            handle_http_request(client_sock, local_endpoint, name);
+            handle_http_request(client_sock, local_endpoint, name, uuid);
         }
         else
             sleep(1);
@@ -331,7 +331,7 @@ void *http_server_thread(void *arg)
 }
 
 // Function to handle M-SEARCH requests
-void handle_msearch(int sock, char *buffer, struct sockaddr_in *sender_addr, char *local_endpoint, const char *name)
+void handle_msearch(int sock, char *buffer, struct sockaddr_in *sender_addr, char *local_endpoint, const char *name, const char *uuid)
 {
     if (strstr(buffer, "M-SEARCH") &&
         (strstr(buffer, "ST: ssdp:all") || strstr(buffer, "ST: upnp:rootdevice") ||
@@ -345,7 +345,7 @@ void handle_msearch(int sock, char *buffer, struct sockaddr_in *sender_addr, cha
 
         // Format response
         char response[BUFFER_SIZE];
-        snprintf(response, sizeof(response), search_response_template, date_str, local_endpoint, name);
+        snprintf(response, sizeof(response), search_response_template, date_str, local_endpoint, name, uuid);
 
         // Send response back to sender
         printf("send m-search reply to %s\n", inet_ntoa(sender_addr->sin_addr));
@@ -445,6 +445,32 @@ int getlocalipaddr(char *ipaddr)
     return -1;
 }
 
+void generate_uuid(char *uuid) {
+    static const char *const lut = "0123456789abcdef";
+    unsigned char buffer[16];
+    char *p = uuid;
+    int i;
+
+    // Generate random bytes
+    srand((unsigned int)time(0));
+    for (i = 0; i < 16; i++) {
+        buffer[i] = (unsigned char)rand() % 256;
+    }
+
+    // Version 4 UUID format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+    // where y is 8, 9, A, or B
+    buffer[6] = (buffer[6] & 0x0f) | 0x40;
+    buffer[8] = (buffer[8] & 0x3f) | 0x80;
+
+    // Convert binary UUID to a string
+    for (i = 0; i < 16; i++) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) *p++ = '-';
+        *p++ = lut[buffer[i] >> 4];
+        *p++ = lut[buffer[i] & 15];
+    }
+    *p = '\0';
+}
+
 int start_upnp_server(int local_port, const char *name)
 {
     int sock;
@@ -452,12 +478,14 @@ int start_upnp_server(int local_port, const char *name)
     char message[BUFFER_SIZE];
     char buffer[BUFFER_SIZE];
     char local_endpoint[30];
+    char uuid[50];
 
     if (getlocalipaddr(local_endpoint))
     {
         fprintf(stderr, "Cannot get local IP address");
         return -1;
     }
+    generate_uuid(uuid);
     sprintf(local_endpoint + strlen(local_endpoint), ":%d", local_port);
     signal(SIGPIPE, SIG_IGN);
     // Create UDP socket for SSDP
@@ -523,7 +551,7 @@ int start_upnp_server(int local_port, const char *name)
 
     // Start HTTP server thread
     pthread_t http_thread;
-    struct server_param server_param = (struct server_param){server_sock, local_endpoint, name};
+    struct server_param server_param = (struct server_param){server_sock, local_endpoint, name, uuid};
     if (pthread_create(&http_thread, NULL, http_server_thread, &server_param) != 0)
     {
         perror("pthread_create");
@@ -556,13 +584,13 @@ int start_upnp_server(int local_port, const char *name)
             if (n > 0)
             {
                 buffer[n] = '\0';
-                handle_msearch(sock, buffer, &sender_addr, local_endpoint, name);
+                handle_msearch(sock, buffer, &sender_addr, local_endpoint, name, uuid);
             }
         }
         else
         {
             // Send periodic advertisement
-            snprintf(message, sizeof(message), notify_template, local_endpoint, name);
+            snprintf(message, sizeof(message), notify_template, local_endpoint, name, uuid);
             sendto(sock, message, strlen(message), 0,
                    (struct sockaddr *)&dest_addr, sizeof(dest_addr));
         }
