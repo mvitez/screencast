@@ -53,7 +53,7 @@ char **get_stream_items()
     int format;
     unsigned long numItems;
     unsigned long bytesAfter;
-    char **items = 0;
+    char **items = 0, item[1000];
     unsigned char *data = 0;
     Window *list;
     char *windowName;
@@ -73,7 +73,7 @@ char **get_stream_items()
     {
         items = (char **)malloc(sizeof(char *) * (numItems + 2));
         int n = 0;
-        items[n++] = strdup("Desktop");
+        items[n++] = strdup("Desktop\tDesktop");
         for (int i = 0; i < numItems; ++i)
         {
             status = XFetchName(display, list[i], &windowName);
@@ -81,7 +81,12 @@ char **get_stream_items()
             if (status >= Success && windowName)
             {
                 if (*windowName && strcmp(windowName, "Desktop"))
-                    items[n++] = strdup(windowName);
+                {
+                    strcpy(item, windowName);
+                    strcat(item, "\t");
+                    strcpysafechars(item + strlen(item), windowName);
+                    items[n++] = strdup(item);
+                }
                 XFree(windowName);
             }
         }
@@ -555,6 +560,6 @@ int main(int argc, char *argv[])
         else if ((!strcmp(argv[i], "-a") || !strcmp(argv[i], "--audiodev")) && i + 1 < argc)
             strcpy(opt.recdevice, argv[++i]);
     }
-    start_upnp_server(opt.local_port);
+    start_upnp_server(opt.local_port, "Screencast DLNA server");
     return 0;
 }

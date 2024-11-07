@@ -31,7 +31,7 @@ const char *notify_template =
     "LOCATION: http://%s/description.xml\r\n"
     "NT: urn:schemas-upnp-org:device:MediaServer:1\r\n"
     "NTS: ssdp:alive\r\n"
-    "SERVER: Screencast DLNA server/1.0\r\n"
+    "SERVER: %s/1.0\r\n"
     "USN: uuid:4af61038-0245-4027-b2fd-799c1b604e24::urn:schemas-upnp-org:device:MediaServer:1\r\n"
     "X-DLNADOC: DMS-1.50\r\n\r\n";
 
@@ -42,7 +42,7 @@ const char *search_response_template =
     "DATE: %s\r\n"
     "EXT:\r\n"
     "LOCATION: http://%s/description.xml\r\n"
-    "SERVER: Screencast DLNA server/1.0\r\n"
+    "SERVER: %s/1.0\r\n"
     "ST: urn:schemas-upnp-org:device:MediaServer:1\r\n"
     "USN: uuid:4af61038-0245-4027-b2fd-799c1b604e24::urn:schemas-upnp-org:device:MediaServer:1\r\n"
     "X-DLNADOC: DMS-1.50\r\n\r\n";
@@ -57,11 +57,11 @@ const char *device_description_template =
     "  </specVersion>\r\n"
     "  <device>\r\n"
     "    <deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>\r\n"
-    "    <friendlyName>Screencast DLNA server</friendlyName>\r\n"
+    "    <friendlyName>%s</friendlyName>\r\n"
     "    <manufacturer>Marko Vitez</manufacturer>\r\n"
     "    <manufacturerURL>https://www.vitez.it</manufacturerURL>\r\n"
-    "    <modelDescription>Screencast DLNA server</modelDescription>\r\n"
-    "    <modelName>Screencast DLNA server</modelName>\r\n"
+    "    <modelDescription>%s</modelDescription>\r\n"
+    "    <modelName>%s</modelName>\r\n"
     "    <modelNumber>1.0</modelNumber>\r\n"
     "    <modelURL>https://github.com/mvitez/screencast</modelURL>\r\n"
     "    <serialNumber>00000000</serialNumber>\r\n"
@@ -142,7 +142,7 @@ const char *browse_response_template_item =
     "    &lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;\n"
     "    &lt;res protocolInfo=\"http-get:*:video/MP2T:DLNA.ORG_PN=MPEG_TS_SD_EU_ISO;"
     "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\"&gt;"
-    "http://%s/stream/%s&lt;/res&gt;\n"
+    "%s&lt;/res&gt;\n"
     "  &lt;/item&gt;\n";
 
 // SOAP response template for Browse action
@@ -166,21 +166,29 @@ const char *soap_response_template_end =
 // Function to handle Browse action
 void handle_browse_request(int client_sock, const char *local_endpoint)
 {
-    char *buffer, *p;
+    char *buffer, *p, *q;
     char **items = get_stream_items();
-    char safename[300];
+    char url[300];
     int buflen = 2000;
     int n = 0, rc;
     for (int i = 0; items && items[i]; i++)
-        buflen += 2 * strlen(items[i]) + strlen(browse_response_template_item) + 100;
+        buflen += strlen(items[i]) + strlen(browse_response_template_item) + 100;
     buffer = (char *)malloc(buflen);
     strcpy(buffer, soap_response_template_start);
     strcat(buffer, browse_response_template_start);
     p = buffer + strlen(buffer);
     for (int i = 0; items && items[i]; i++)
     {
-        strcpysafechars(safename, items[i]);
-        sprintf(p, browse_response_template_item, i + 1, items[i], local_endpoint, safename);
+        q = strchr(items[i], '\t');
+        if (!q)
+            continue;
+        *q++ = 0;
+        if (memcmp(q, "http://", 7) && memcmp(q, "rtsp://", 7))
+        {
+            sprintf(url, "http://%s/stream/%s", local_endpoint, q);
+            q = url;
+        }
+        sprintf(p, browse_response_template_item, i + 1, items[i], q);
         p += strlen(p);
         free(items[i]);
         n++;
@@ -216,7 +224,7 @@ int contains_soap_action(const char *buffer, const char *action)
 }
 
 // Function to handle HTTP requests
-void handle_http_request(int client_sock, const char *local_endpoint)
+void handle_http_request(int client_sock, const char *local_endpoint, const char *name)
 {
     char buffer[BUFFER_SIZE];
     char *p;
@@ -233,7 +241,8 @@ void handle_http_request(int client_sock, const char *local_endpoint)
     printf("Incoming HTTP request: %*.*s\n", (int)n, (int)n, buffer);
     if (strstr(buffer, "GET /description.xml") != NULL)
     {
-        response = device_description_template;
+        snprintf(buffer, sizeof(buffer), device_description_template, name, name, name);
+        response = buffer;
     }
     else if (strstr(buffer, "GET /ContentDirectory.xml") != NULL)
     {
@@ -294,6 +303,7 @@ struct server_param
 {
     int server_sock;
     const char *local_endpoint;
+    const char *name;
 };
 
 // Thread function to handle HTTP server
@@ -301,6 +311,7 @@ void *http_server_thread(void *arg)
 {
     const char *local_endpoint = ((struct server_param *)arg)->local_endpoint;
     int server_sock = ((struct server_param *)arg)->server_sock;
+    const char *name = ((struct server_param *)arg)->name;
 
     for (;;)
     {
@@ -310,7 +321,7 @@ void *http_server_thread(void *arg)
 
         if (client_sock >= 0)
         {
-            handle_http_request(client_sock, local_endpoint);
+            handle_http_request(client_sock, local_endpoint, name);
         }
         else
             sleep(1);
@@ -320,7 +331,7 @@ void *http_server_thread(void *arg)
 }
 
 // Function to handle M-SEARCH requests
-void handle_msearch(int sock, char *buffer, struct sockaddr_in *sender_addr, char *local_endpoint)
+void handle_msearch(int sock, char *buffer, struct sockaddr_in *sender_addr, char *local_endpoint, const char *name)
 {
     if (strstr(buffer, "M-SEARCH") &&
         (strstr(buffer, "ST: ssdp:all") || strstr(buffer, "ST: upnp:rootdevice") ||
@@ -334,7 +345,7 @@ void handle_msearch(int sock, char *buffer, struct sockaddr_in *sender_addr, cha
 
         // Format response
         char response[BUFFER_SIZE];
-        snprintf(response, sizeof(response), search_response_template, date_str, local_endpoint);
+        snprintf(response, sizeof(response), search_response_template, date_str, local_endpoint, name);
 
         // Send response back to sender
         printf("send m-search reply to %s\n", inet_ntoa(sender_addr->sin_addr));
@@ -434,7 +445,7 @@ int getlocalipaddr(char *ipaddr)
     return -1;
 }
 
-int start_upnp_server(int local_port)
+int start_upnp_server(int local_port, const char *name)
 {
     int sock;
     struct sockaddr_in bind_addr, dest_addr;
@@ -512,7 +523,7 @@ int start_upnp_server(int local_port)
 
     // Start HTTP server thread
     pthread_t http_thread;
-    struct server_param server_param = (struct server_param){server_sock, local_endpoint};
+    struct server_param server_param = (struct server_param){server_sock, local_endpoint, name};
     if (pthread_create(&http_thread, NULL, http_server_thread, &server_param) != 0)
     {
         perror("pthread_create");
@@ -545,13 +556,13 @@ int start_upnp_server(int local_port)
             if (n > 0)
             {
                 buffer[n] = '\0';
-                handle_msearch(sock, buffer, &sender_addr, local_endpoint);
+                handle_msearch(sock, buffer, &sender_addr, local_endpoint, name);
             }
         }
         else
         {
             // Send periodic advertisement
-            snprintf(message, sizeof(message), notify_template, local_endpoint);
+            snprintf(message, sizeof(message), notify_template, local_endpoint, name);
             sendto(sock, message, strlen(message), 0,
                    (struct sockaddr *)&dest_addr, sizeof(dest_addr));
         }
